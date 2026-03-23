@@ -15,6 +15,22 @@ Metadata:
           - InstanceType
           - KeyPairName
       - Label:
+          default: "GitHub App Integration (Optional)"
+        Parameters:
+          - GitHubAppId
+          - GitHubAppInstallationId
+          - GitHubAppKeySSMPath
+          - GitHubRepoUrl
+      - Label:
+          default: "Slack Integration (Optional)"
+        Parameters:
+          - SlackBotTokenSSMPath
+          - SlackAppTokenSSMPath
+      - Label:
+          default: "Claude Code Integration (Optional)"
+        Parameters:
+          - EnableClaudeCode
+      - Label:
           default: "Network Configuration"
         Parameters:
           - CreateVPCEndpoints
@@ -26,6 +42,7 @@ Parameters:
     Default: "global.amazon.nova-2-lite-v1:0"
     Description: "Bedrock model ID - Nova 2 Lite offers best price-performance for everyday tasks"
     AllowedValues:
+      - "us.anthropic.claude-sonnet-4-6"
       - "global.amazon.nova-2-lite-v1:0"
       - "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
       - "us.amazon.nova-pro-v1:0"
@@ -86,6 +103,44 @@ Parameters:
       - "true"
       - "false"
 
+  GitHubAppId:
+    Type: String
+    Default: ""
+    Description: "GitHub App ID for repository access (leave empty to skip GitHub integration)"
+
+  GitHubAppInstallationId:
+    Type: String
+    Default: ""
+    Description: "GitHub App Installation ID for the target organization/account"
+
+  GitHubAppKeySSMPath:
+    Type: String
+    Default: ""
+    Description: "SSM Parameter Store path for GitHub App private key (e.g. /openclaw/github-app-key). Pre-store as SecureString before deploy."
+
+  GitHubRepoUrl:
+    Type: String
+    Default: ""
+    Description: "GitHub repo HTTPS URL to clone (e.g. https://github.com/org/repo.git)"
+
+  SlackBotTokenSSMPath:
+    Type: String
+    Default: ""
+    Description: "SSM Parameter Store path for Slack bot token (e.g. /openclaw/slack-bot-token). Pre-store as SecureString before deploy."
+
+  SlackAppTokenSSMPath:
+    Type: String
+    Default: ""
+    Description: "SSM Parameter Store path for Slack app token (e.g. /openclaw/slack-app-token). Pre-store as SecureString before deploy."
+
+  EnableClaudeCode:
+    Type: String
+    Default: "false"
+    Description: "Install Claude Code and ACPX for coding agent delegation (requires manual 'claude' auth after deploy)"
+    AllowedValues:
+      - "true"
+      - "false"
+
 Conditions:
   CreateEndpoints: !Equals [!Ref CreateVPCEndpoints, "true"]
   HasKeyPair: !Not [!Equals [!Ref KeyPairName, "none"]]
@@ -122,6 +177,9 @@ Conditions:
       - Condition: IsEuNorth1
       - Condition: IsSaEast1
   CreateMantleEndpoint: !And [ Condition: CreateEndpoints, Condition: IsMantleSupportedRegion ]     
+  ConfigureGitHub: !Not [!Equals [!Ref GitHubAppId, ""]]
+  ConfigureSlack: !Not [!Equals [!Ref SlackBotTokenSSMPath, ""]]
+  ConfigureClaudeCode: !Equals [!Ref EnableClaudeCode, "true"]
   EnableDocker: !Equals [!Ref EnableSandbox, "true"]
   ProtectData: !Equals [!Ref EnableDataProtection, "true"]
   DeleteData: !Not [!Equals [!Ref EnableDataProtection, "true"]]
@@ -335,7 +393,16 @@ Resources:
                 Action:
                   - 'ssm:PutParameter'
                   - 'ssm:GetParameter'
-                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/${AWS::StackName}/*'
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/*'
+        - PolicyName: BedrockMarketplacePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'aws-marketplace:ViewSubscriptions'
+                  - 'aws-marketplace:Subscribe'
+                Resource: '*'
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-instance-role"
@@ -421,6 +488,7 @@ Resources:
           Ebs:
             VolumeSize: 30
             VolumeType: gp3
+            Encrypted: true
             DeleteOnTermination: true
       UserData:
         Fn::Base64: !Sub |
@@ -721,48 +789,12 @@ Resources:
           npm install -g openclaw-feishu@latest --timeout=60000 2>/dev/null || echo "Feishu plugin install skipped"
           '
           
-          # Create SOUL.md — first-message onboarding prompt
+          # Create SOUL.md
           sudo -u ubuntu cat > /home/ubuntu/.openclaw/SOUL.md << 'SOUL_EOF'
           # OpenClaw on AWS
-
-          You are an AI assistant running on AWS with Amazon Bedrock. You are helpful, concise, and friendly.
-
-          ## First Conversation
-
-          When a user sends their very first message (no prior conversation history), start by warmly greeting them and then help them connect a messaging platform. Say something like:
-
-          "Welcome! I'm your AI assistant running on AWS. Before we dive in, let's connect me to your favorite messaging app so you can chat with me anytime.
-
-          Which platform would you like to connect?
-          1. 📱 WhatsApp — scan a QR code from your phone
-          2. ✈️ Telegram — create a bot via @BotFather
-          3. 🎮 Discord — add me to your server
-          4. 💼 Slack — install me in your workspace
-          5. 🐦 Feishu/Lark — connect via webhook bridge
-
-          Just reply with a number or platform name, and I'll walk you through the setup step by step."
-
-          After the user chooses, guide them through the specific setup:
-
-          **WhatsApp**: Tell them to go to the Web UI (Channels → Add Channel → WhatsApp), then on their phone: WhatsApp → Settings → Linked Devices → Link a Device → scan the QR code.
-
-          **Telegram**: Tell them to message @BotFather on Telegram, send /newbot, choose a name and username (must end with 'bot'), copy the token, then paste it in Web UI (Channels → Add Channel → Telegram).
-
-          **Discord**: Tell them to visit discord.com/developers/applications, create a new app, go to Bot → Add Bot, copy the token, enable Message Content Intent, generate an invite URL, then paste the token in Web UI (Channels → Add Channel → Discord).
-
-          **Slack**: Tell them to visit api.slack.com/apps, create a new app, add bot scopes (chat:write, channels:history), install to workspace, copy the Bot User OAuth Token, then paste in Web UI (Channels → Add Channel → Slack).
-
-          **Feishu/Lark**: Tell them this uses a community bridge plugin. They need to configure their Feishu bot credentials in the Web UI. Point them to the docs: https://docs.openclaw.ai/channels or the community plugin page.
-
-          ## Ongoing Conversations
-
-          After the first conversation, be a helpful general-purpose assistant. You can:
-          - Answer questions using web search
-          - Help with coding, writing, analysis
-          - Manage tasks and reminders
-          - Process files and documents
-
-          Be concise. Get to the point. If there's a good answer, give it directly.
+          You are an AI assistant running on AWS with Amazon Bedrock. Be helpful, concise, and friendly.
+          On first message, greet the user and offer to connect a messaging platform (WhatsApp, Telegram, Discord, Slack, Feishu).
+          After setup, be a general-purpose assistant for coding, writing, analysis, and tasks.
           SOUL_EOF
           chown ubuntu:ubuntu /home/ubuntu/.openclaw/SOUL.md
           
@@ -808,6 +840,21 @@ Resources:
           SSMEOF
           chmod +x /home/ubuntu/ssm-portforward.sh
           chown ubuntu:ubuntu /home/ubuntu/ssm-portforward.sh
+
+          # Download and run integration setup script (GitHub, Slack, Claude Code, hardening)
+          echo "[8.8/9] Running integration setup..."
+          curl -fsSL "https://raw.githubusercontent.com/leland-momos/openclaw-dev-bot-cloudformation/feat/github-app-credentials/setup-integrations.sh" -o /tmp/setup-integrations.sh
+          chmod +x /tmp/setup-integrations.sh
+          GITHUB_APP_ID="${GitHubAppId}" \
+          GITHUB_APP_INSTALLATION_ID="${GitHubAppInstallationId}" \
+          GITHUB_APP_KEY_SSM_PATH="${GitHubAppKeySSMPath}" \
+          GITHUB_REPO_URL="${GitHubRepoUrl}" \
+          SLACK_BOT_TOKEN_SSM_PATH="${SlackBotTokenSSMPath}" \
+          SLACK_APP_TOKEN_SSM_PATH="${SlackAppTokenSSMPath}" \
+          ENABLE_CLAUDE_CODE="${EnableClaudeCode}" \
+          AWS_REGION="$AWS_REGION" \
+          bash /tmp/setup-integrations.sh 2>&1 | tee -a /var/log/openclaw-setup.log
+          rm -f /tmp/setup-integrations.sh
 
           # Complete
           echo "[9/9] Signaling CloudFormation..."
